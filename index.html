@@ -5,8 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>DimaPlace · Оформление заказа</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
     :root {
       --bg: var(--tg-theme-bg-color, #17212b);
@@ -47,7 +45,7 @@
     input:focus { border-color: var(--accent); }
     input.invalid { border-color: var(--danger); }
     .err { color: var(--danger); font-size: 12px; min-height: 14px; margin-top: 4px; }
-    #map { height: 240px; border-radius: 12px; margin-top: 6px; overflow: hidden; }
+    #map { height: 240px; border-radius: 12px; margin-top: 6px; overflow: hidden; background: var(--field); }
     .addr-wrap { position: relative; }
     .suggestions {
       position: absolute; left: 0; right: 0; top: calc(100% + 4px);
@@ -104,13 +102,13 @@
 
   <div id="deliveryBlock">
     <label>Адрес доставки</label>
-    <div id="map"></div>
-    <button id="geoBtn" type="button">📍 Моё местоположение</button>
     <div class="addr-wrap">
-      <input id="address" type="text" placeholder="Город, улица, дом" autocomplete="off" style="margin-top:8px" />
+      <input id="address" type="text" placeholder="Начните вводить: город, улица, дом" autocomplete="off" />
       <div class="suggestions" id="suggestions" style="display:none"></div>
     </div>
-    <div class="hint-small">Введите адрес, передвиньте точку на карте или нажмите «Моё местоположение».</div>
+    <div id="map"></div>
+    <button id="geoBtn" type="button">📍 Моё местоположение</button>
+      <div class="hint-small" id="addrHint">Выберите адрес из подсказок, передвиньте точку на карте или нажмите «Моё местоположение».</div>
     <div class="err" id="addrErr"></div>
   </div>
 
@@ -130,6 +128,17 @@
     const PNAME = params.get('name') || 'Товар';
     const PRICE = params.get('price') || '';
 
+    // ───────── Ключи (безопасны для браузера; ограничьте по домену/referer в кабинетах) ─────────
+    // Приоритет — query-параметры от бота (app.bot.webapp-*), затем хардкод-фоллбэк ниже.
+    // Yandex JS API ключ: https://developer.tech.yandex.ru → "JavaScript API и HTTP Геокодер"
+    // DaData "Ключ для API": https://dadata.ru/profile/#/ → API ключи
+    const YANDEX_API_KEY = params.get('ymaps') || 'PUT_YOUR_YANDEX_JS_API_KEY';
+    const DADATA_TOKEN = params.get('dadata') || 'PUT_YOUR_DADATA_TOKEN';
+    // Ключ считается заданным, если он непустой и не равен плейсхолдеру.
+    const keyOk = (v) => !!v && !/^PUT_YOUR_/.test(v);
+    const HAS_YMAPS = keyOk(YANDEX_API_KEY);
+    const HAS_DADATA = keyOk(DADATA_TOKEN);
+
     document.getElementById('pName').textContent = PNAME;
     document.getElementById('pPrice').textContent = PRICE ? (Number(PRICE).toLocaleString('ru-RU') + ' ₽') : '';
 
@@ -142,119 +151,96 @@
       }
     } catch (e) {}
 
-    // ---- Map (Leaflet + OpenStreetMap) ----
-    const DEFAULT = [55.751244, 37.618423]; // Moscow
+    const addressInput = document.getElementById('address');
+    const suggestionsBox = document.getElementById('suggestions');
+
+    // ───────── Yandex Maps (карта для уточнения точки) ─────────
+    const DEFAULT = [55.751244, 37.618423]; // Moscow [lat, lon]
     let lat = null, lon = null;
-    const map = L.map('map', { zoomControl: true }).setView(DEFAULT, 11);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19, attribution: '© OpenStreetMap',
-    }).addTo(map);
-    const marker = L.marker(DEFAULT, { draggable: true }).addTo(map);
+    let map = null, placemark = null;
+
+    function disableMap(message) {
+      const el = document.getElementById('map');
+      if (el) {
+        el.style.height = 'auto';
+        el.style.padding = '16px';
+        el.style.textAlign = 'center';
+        el.style.color = 'var(--hint)';
+        el.style.fontSize = '13px';
+        el.textContent = message;
+      }
+    }
+
+    (function loadYmaps() {
+      if (!HAS_YMAPS) {
+        disableMap('Карта недоступна — введите адрес вручную в поле выше.');
+        return;
+      }
+      const s = document.createElement('script');
+      s.src = `https://api-maps.yandex.ru/2.1/?apikey=${YANDEX_API_KEY}&lang=ru_RU`;
+      s.onload = () => { if (window.ymaps) ymaps.ready(initMap); };
+      s.onerror = () => disableMap('Не удалось загрузить карту — введите адрес вручную в поле выше.');
+      document.head.appendChild(s);
+    })();
+
+    function initMap() {
+      map = new ymaps.Map('map', { center: DEFAULT, zoom: 11, controls: ['zoomControl'] }, { suppressMapOpenBlock: true });
+      placemark = new ymaps.Placemark(DEFAULT, {}, { draggable: true, preset: 'islands#redDotIcon' });
+      map.geoObjects.add(placemark);
+      placemark.events.add('dragend', () => {
+        const c = placemark.geometry.getCoordinates();
+        setPoint(c[0], c[1], true);
+      });
+      map.events.add('click', (e) => {
+        const c = e.get('coords');
+        setPoint(c[0], c[1], true);
+      });
+    }
 
     function setPoint(la, lo, doReverse) {
       lat = la; lon = lo;
-      marker.setLatLng([la, lo]);
-      map.panTo([la, lo]);
-      if (doReverse) reverseGeocode(la, lo);
-    }
-
-    marker.on('dragend', () => {
-      const p = marker.getLatLng();
-      setPoint(p.lat, p.lng, true);
-    });
-    map.on('click', (e) => setPoint(e.latlng.lat, e.latlng.lng, true));
-
-    // ---- "My location" button ----
-    // Inside Telegram's webview the plain navigator.geolocation API is usually
-    // blocked, so prefer Telegram's WebApp.LocationManager (Bot API 8.0+) and
-    // fall back to the browser API only when running outside Telegram.
-    const geoBtn = document.getElementById('geoBtn');
-
-    function resetGeoBtn() {
-      geoBtn.disabled = false;
-      geoBtn.textContent = '📍 Моё местоположение';
-    }
-    function applyCoords(la, lo) {
-      setPoint(la, lo, true);
-      map.setView([la, lo], 16);
-      resetGeoBtn();
-    }
-
-    function useBrowserGeo() {
-      if (!navigator.geolocation) {
-        resetGeoBtn();
-        if (tg) tg.showAlert('Геолокация недоступна на этом устройстве. Выберите точку на карте.');
-        return;
+      if (placemark && map) {
+        placemark.geometry.setCoordinates([la, lo]);
+        map.setCenter([la, lo], Math.max(map.getZoom(), 16));
       }
-      navigator.geolocation.getCurrentPosition(
-        (pos) => applyCoords(pos.coords.latitude, pos.coords.longitude),
-        () => {
-          resetGeoBtn();
-          if (tg) tg.showAlert('Не удалось определить местоположение. Разрешите доступ к геолокации или выберите точку на карте.');
-        },
-        { enableHighAccuracy: true, timeout: 10000 },
-      );
+      if (doReverse) {
+        dadataGeolocate(la, lo).then(s => { if (s) { addressInput.value = s.value; validate(); } });
+      }
     }
 
-    function useTelegramGeo(lm) {
-      const fetchLoc = () => lm.getLocation((loc) => {
-        if (loc && typeof loc.latitude === 'number') {
-          applyCoords(loc.latitude, loc.longitude);
-          return;
-        }
-        resetGeoBtn();
-        // Access denied or unavailable — offer to open Telegram settings.
-        if (lm.isAccessRequested && !lm.isAccessGranted && tg.showConfirm) {
-          tg.showConfirm('Доступ к геолокации запрещён. Открыть настройки?', (ok) => {
-            if (ok && lm.openSettings) lm.openSettings();
-          });
-        } else if (tg.showAlert) {
-          tg.showAlert('Не удалось получить местоположение. Выберите точку на карте.');
-        }
-      });
-      if (lm.isInited) fetchLoc(); else lm.init(fetchLoc);
+    // ───────── DaData (подсказки + обратное геокодирование) ─────────
+    function dadataHeaders() {
+      return {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': 'Token ' + DADATA_TOKEN,
+      };
+    }
+    function dadataSuggest(q) {
+      if (!HAS_DADATA) return Promise.resolve([]);
+      return fetch('https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address', {
+        method: 'POST', headers: dadataHeaders(), body: JSON.stringify({ query: q, count: 6 }),
+      }).then(r => r.json()).then(d => (d && d.suggestions) || []).catch(() => []);
+    }
+    function dadataGeolocate(la, lo) {
+      if (!HAS_DADATA) return Promise.resolve(null);
+      return fetch('https://suggestions.dadata.ru/suggestions/api/4_1/rs/geolocate/address', {
+        method: 'POST', headers: dadataHeaders(), body: JSON.stringify({ lat: la, lon: lo, count: 1 }),
+      }).then(r => r.json()).then(d => (d && d.suggestions && d.suggestions[0]) || null).catch(() => null);
     }
 
-    geoBtn.addEventListener('click', () => {
-      geoBtn.disabled = true;
-      geoBtn.textContent = '📍 Определяем…';
-      const lm = tg && tg.LocationManager;
-      const hasTgGeo = lm && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0');
-      if (hasTgGeo) useTelegramGeo(lm); else useBrowserGeo();
-    });
-
-    // ---- Nominatim geocoding (free, no key; respect 1 req/s) ----
-    const addressInput = document.getElementById('address');
-    const suggestionsBox = document.getElementById('suggestions');
     let debounceTimer = null;
-
-    function reverseGeocode(la, lo) {
-      const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${la}&lon=${lo}&accept-language=ru`;
-      fetch(url, { headers: { 'Accept': 'application/json' } })
-        .then(r => r.json())
-        .then(d => { if (d && d.display_name) { addressInput.value = d.display_name; validate(); } })
-        .catch(() => {});
-    }
-
-    function searchAddress(q) {
-      const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=5&accept-language=ru&countrycodes=ru&q=${encodeURIComponent(q)}`;
-      fetch(url, { headers: { 'Accept': 'application/json' } })
-        .then(r => r.json())
-        .then(renderSuggestions)
-        .catch(() => {});
-    }
-
     function renderSuggestions(items) {
       suggestionsBox.innerHTML = '';
       if (!items || !items.length) { suggestionsBox.style.display = 'none'; return; }
       items.forEach(it => {
         const div = document.createElement('div');
-        div.textContent = it.display_name;
+        div.textContent = it.value;
         div.addEventListener('click', () => {
-          addressInput.value = it.display_name;
-          setPoint(parseFloat(it.lat), parseFloat(it.lon), false);
-          map.setView([parseFloat(it.lat), parseFloat(it.lon)], 16);
+          addressInput.value = it.value;
           suggestionsBox.style.display = 'none';
+          const gla = it.data && it.data.geo_lat, glo = it.data && it.data.geo_lon;
+          if (gla && glo) setPoint(parseFloat(gla), parseFloat(glo), false);
           validate();
         });
         suggestionsBox.appendChild(div);
@@ -266,14 +252,53 @@
       validate();
       const q = addressInput.value.trim();
       clearTimeout(debounceTimer);
-      if (q.length < 4) { suggestionsBox.style.display = 'none'; return; }
-      debounceTimer = setTimeout(() => searchAddress(q), 700);
+      if (q.length < 3) { suggestionsBox.style.display = 'none'; return; }
+      debounceTimer = setTimeout(() => dadataSuggest(q).then(renderSuggestions), 300);
     });
     document.addEventListener('click', (e) => {
       if (!suggestionsBox.contains(e.target) && e.target !== addressInput) suggestionsBox.style.display = 'none';
     });
 
-    // ---- Fulfillment toggle (delivery / pickup) ----
+    // ───────── "Моё местоположение" (Telegram LocationManager + фоллбэк) ─────────
+    const geoBtn = document.getElementById('geoBtn');
+    function resetGeoBtn() { geoBtn.disabled = false; geoBtn.textContent = '📍 Моё местоположение'; }
+    function applyCoords(la, lo) { setPoint(la, lo, true); resetGeoBtn(); }
+
+    function useBrowserGeo() {
+      if (!navigator.geolocation) {
+        resetGeoBtn();
+        if (tg) tg.showAlert('Геолокация недоступна на этом устройстве. Выберите точку на карте.');
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => applyCoords(pos.coords.latitude, pos.coords.longitude),
+        () => {
+          resetGeoBtn();
+          if (tg) tg.showAlert('Не удалось определить местоположение. Разрешите доступ или выберите точку на карте.');
+        },
+        { enableHighAccuracy: true, timeout: 10000 },
+      );
+    }
+    function useTelegramGeo(lm) {
+      const fetchLoc = () => lm.getLocation((loc) => {
+        if (loc && typeof loc.latitude === 'number') { applyCoords(loc.latitude, loc.longitude); return; }
+        resetGeoBtn();
+        if (lm.isAccessRequested && !lm.isAccessGranted && tg.showConfirm) {
+          tg.showConfirm('Доступ к геолокации запрещён. Открыть настройки?', (ok) => { if (ok && lm.openSettings) lm.openSettings(); });
+        } else if (tg.showAlert) {
+          tg.showAlert('Не удалось получить местоположение. Выберите точку на карте.');
+        }
+      });
+      if (lm.isInited) fetchLoc(); else lm.init(fetchLoc);
+    }
+    geoBtn.addEventListener('click', () => {
+      geoBtn.disabled = true; geoBtn.textContent = '📍 Определяем…';
+      const lm = tg && tg.LocationManager;
+      const hasTgGeo = lm && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0');
+      if (hasTgGeo) useTelegramGeo(lm); else useBrowserGeo();
+    });
+
+    // ───────── Способ получения (доставка / самовывоз) ─────────
     let fulfillment = 'DELIVERY';
     const deliveryBlock = document.getElementById('deliveryBlock');
     const pickupHint = document.getElementById('pickupHint');
@@ -284,12 +309,12 @@
         const isDelivery = fulfillment === 'DELIVERY';
         deliveryBlock.style.display = isDelivery ? 'block' : 'none';
         pickupHint.style.display = isDelivery ? 'none' : 'block';
-        if (isDelivery) setTimeout(() => map.invalidateSize(), 50);
+        if (isDelivery && map) setTimeout(() => map.container.fitToViewport(), 50);
         validate();
       });
     });
 
-    // ---- Validation ----
+    // ───────── Валидация ─────────
     const fioEl = document.getElementById('fio');
     const phoneEl = document.getElementById('phone');
     const fioErr = document.getElementById('fioErr');
@@ -312,7 +337,6 @@
         phoneEl.classList.add('invalid'); ok = false;
       } else { phoneErr.textContent = ''; phoneEl.classList.remove('invalid'); }
 
-      // Address is only required for delivery.
       if (fulfillment === 'DELIVERY') {
         const addr = addressInput.value.trim();
         if (addr.length < 5) {
@@ -350,12 +374,11 @@
       }
     }
 
-    // ---- Telegram MainButton (falls back to in-page button outside Telegram) ----
+    // ───────── Telegram MainButton (фоллбэк — кнопка на странице) ─────────
     function updateMainButton(ok) {
       if (!tg || !tg.MainButton) return;
       if (ok) tg.MainButton.enable(); else tg.MainButton.disable();
     }
-
     if (tg && tg.MainButton) {
       tg.MainButton.setText('Оформить заказ');
       tg.MainButton.show();
@@ -364,6 +387,19 @@
     } else {
       document.getElementById('fallbackSubmit').addEventListener('click', submit);
     }
+
+    // Подстраиваем подсказку под доступность карты/автоподсказок.
+    (function tuneAddrHint() {
+      const h = document.getElementById('addrHint');
+      if (!h) return;
+      if (!HAS_DADATA && !HAS_YMAPS) {
+        h.textContent = 'Введите полный адрес доставки вручную.';
+      } else if (!HAS_DADATA) {
+        h.textContent = 'Введите адрес вручную, точку можно уточнить на карте или кнопкой «Моё местоположение».';
+      } else if (!HAS_YMAPS) {
+        h.textContent = 'Выберите адрес из подсказок при вводе или нажмите «Моё местоположение».';
+      }
+    })();
 
     validate();
   </script>
