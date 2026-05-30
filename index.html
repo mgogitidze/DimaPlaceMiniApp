@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>DimaPlace · Оформление заказа</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #17212b);
+      --text: var(--tg-theme-text-color, #ffffff);
+      --hint: var(--tg-theme-hint-color, #8b9aa8);
+      --field: var(--tg-theme-secondary-bg-color, #232e3c);
+      --accent: var(--tg-theme-button-color, #3390ec);
+      --accent-text: var(--tg-theme-button-text-color, #ffffff);
+      --danger: #e25c5c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 16px 16px 32px;
+    }
+    .product {
+      background: var(--field);
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin-bottom: 18px;
+    }
+    .product .name { font-weight: 600; font-size: 15px; }
+    .product .price { color: var(--accent); font-weight: 700; font-size: 18px; margin-top: 4px; }
+    label { display: block; font-size: 13px; color: var(--hint); margin: 14px 0 6px; }
+    input {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      background: var(--field);
+      color: var(--text);
+      font-size: 16px;
+      outline: none;
+    }
+    input:focus { border-color: var(--accent); }
+    input.invalid { border-color: var(--danger); }
+    .err { color: var(--danger); font-size: 12px; min-height: 14px; margin-top: 4px; }
+    #map { height: 240px; border-radius: 12px; margin-top: 6px; overflow: hidden; }
+    .addr-wrap { position: relative; }
+    .suggestions {
+      position: absolute; left: 0; right: 0; top: calc(100% + 4px);
+      background: var(--field); border-radius: 10px; overflow: hidden; z-index: 1000;
+      box-shadow: 0 6px 24px rgba(0,0,0,.4);
+    }
+    .suggestions div { padding: 10px 14px; font-size: 14px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,.06); }
+    .suggestions div:last-child { border-bottom: none; }
+    .suggestions div:active { background: var(--accent); color: var(--accent-text); }
+    .hint-small { color: var(--hint); font-size: 12px; margin-top: 6px; }
+    #geoBtn {
+      width: 100%; margin-top: 8px; padding: 11px; border: 1px solid var(--accent);
+      border-radius: 10px; background: transparent; color: var(--accent);
+      font-size: 14px; font-weight: 600;
+    }
+    #geoBtn:disabled { opacity: .5; }
+    textarea {
+      width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid transparent;
+      background: var(--field); color: var(--text); font-size: 16px; outline: none;
+      resize: vertical; min-height: 64px; font-family: inherit;
+    }
+    textarea:focus { border-color: var(--accent); }
+    #fallbackSubmit {
+      width: 100%; margin-top: 22px; padding: 14px; border: none; border-radius: 12px;
+      background: var(--accent); color: var(--accent-text); font-size: 16px; font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="product" id="product">
+    <div class="name" id="pName">Товар</div>
+    <div class="price" id="pPrice"></div>
+  </div>
+
+  <label for="fio">ФИО</label>
+  <input id="fio" type="text" placeholder="Иванов Иван Иванович" autocomplete="name" />
+  <div class="err" id="fioErr"></div>
+
+  <label for="phone">Телефон</label>
+  <input id="phone" type="tel" placeholder="+7 900 000 00 00" autocomplete="tel" />
+  <div class="err" id="phoneErr"></div>
+
+  <label>Адрес доставки</label>
+  <div id="map"></div>
+  <button id="geoBtn" type="button">📍 Моё местоположение</button>
+  <div class="addr-wrap">
+    <input id="address" type="text" placeholder="Город, улица, дом" autocomplete="off" style="margin-top:8px" />
+    <div class="suggestions" id="suggestions" style="display:none"></div>
+  </div>
+  <div class="hint-small">Введите адрес, передвиньте точку на карте или нажмите «Моё местоположение».</div>
+  <div class="err" id="addrErr"></div>
+
+  <label for="comment">Комментарий к заказу (необязательно)</label>
+  <textarea id="comment" placeholder="Например: домофон не работает, позвонить за 30 минут"></textarea>
+
+  <button id="fallbackSubmit">Оформить заказ</button>
+
+  <script>
+    const tg = window.Telegram ? window.Telegram.WebApp : null;
+    if (tg) { tg.ready(); tg.expand(); }
+
+    const params = new URLSearchParams(location.search);
+    const PID = params.get('pid') || '';
+    const PNAME = params.get('name') || 'Товар';
+    const PRICE = params.get('price') || '';
+
+    document.getElementById('pName').textContent = PNAME;
+    document.getElementById('pPrice').textContent = PRICE ? (Number(PRICE).toLocaleString('ru-RU') + ' ₽') : '';
+
+    // Prefill ФИО from Telegram profile if available.
+    try {
+      const u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
+      if (u) {
+        const full = [u.last_name, u.first_name].filter(Boolean).join(' ');
+        if (full) document.getElementById('fio').value = full;
+      }
+    } catch (e) {}
+
+    // ---- Map (Leaflet + OpenStreetMap) ----
+    const DEFAULT = [55.751244, 37.618423]; // Moscow
+    let lat = null, lon = null;
+    const map = L.map('map', { zoomControl: true }).setView(DEFAULT, 11);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '© OpenStreetMap',
+    }).addTo(map);
+    const marker = L.marker(DEFAULT, { draggable: true }).addTo(map);
+
+    function setPoint(la, lo, doReverse) {
+      lat = la; lon = lo;
+      marker.setLatLng([la, lo]);
+      map.panTo([la, lo]);
+      if (doReverse) reverseGeocode(la, lo);
+    }
+
+    marker.on('dragend', () => {
+      const p = marker.getLatLng();
+      setPoint(p.lat, p.lng, true);
+    });
+    map.on('click', (e) => setPoint(e.latlng.lat, e.latlng.lng, true));
+
+    // ---- "My location" button ----
+    const geoBtn = document.getElementById('geoBtn');
+    geoBtn.addEventListener('click', () => {
+      if (!navigator.geolocation) {
+        if (tg) tg.showAlert('Геолокация недоступна на этом устройстве.');
+        return;
+      }
+      geoBtn.disabled = true;
+      geoBtn.textContent = '📍 Определяем…';
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setPoint(pos.coords.latitude, pos.coords.longitude, true);
+          map.setView([pos.coords.latitude, pos.coords.longitude], 16);
+          geoBtn.disabled = false;
+          geoBtn.textContent = '📍 Моё местоположение';
+        },
+        () => {
+          geoBtn.disabled = false;
+          geoBtn.textContent = '📍 Моё местоположение';
+          if (tg) tg.showAlert('Не удалось определить местоположение. Разрешите доступ к геолокации или выберите точку на карте.');
+        },
+        { enableHighAccuracy: true, timeout: 10000 },
+      );
+    });
+
+    // ---- Nominatim geocoding (free, no key; respect 1 req/s) ----
+    const addressInput = document.getElementById('address');
+    const suggestionsBox = document.getElementById('suggestions');
+    let debounceTimer = null;
+
+    function reverseGeocode(la, lo) {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${la}&lon=${lo}&accept-language=ru`;
+      fetch(url, { headers: { 'Accept': 'application/json' } })
+        .then(r => r.json())
+        .then(d => { if (d && d.display_name) { addressInput.value = d.display_name; validate(); } })
+        .catch(() => {});
+    }
+
+    function searchAddress(q) {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=5&accept-language=ru&countrycodes=ru&q=${encodeURIComponent(q)}`;
+      fetch(url, { headers: { 'Accept': 'application/json' } })
+        .then(r => r.json())
+        .then(renderSuggestions)
+        .catch(() => {});
+    }
+
+    function renderSuggestions(items) {
+      suggestionsBox.innerHTML = '';
+      if (!items || !items.length) { suggestionsBox.style.display = 'none'; return; }
+      items.forEach(it => {
+        const div = document.createElement('div');
+        div.textContent = it.display_name;
+        div.addEventListener('click', () => {
+          addressInput.value = it.display_name;
+          setPoint(parseFloat(it.lat), parseFloat(it.lon), false);
+          map.setView([parseFloat(it.lat), parseFloat(it.lon)], 16);
+          suggestionsBox.style.display = 'none';
+          validate();
+        });
+        suggestionsBox.appendChild(div);
+      });
+      suggestionsBox.style.display = 'block';
+    }
+
+    addressInput.addEventListener('input', () => {
+      validate();
+      const q = addressInput.value.trim();
+      clearTimeout(debounceTimer);
+      if (q.length < 4) { suggestionsBox.style.display = 'none'; return; }
+      debounceTimer = setTimeout(() => searchAddress(q), 700);
+    });
+    document.addEventListener('click', (e) => {
+      if (!suggestionsBox.contains(e.target) && e.target !== addressInput) suggestionsBox.style.display = 'none';
+    });
+
+    // ---- Validation ----
+    const fioEl = document.getElementById('fio');
+    const phoneEl = document.getElementById('phone');
+    const fioErr = document.getElementById('fioErr');
+    const phoneErr = document.getElementById('phoneErr');
+    const addrErr = document.getElementById('addrErr');
+
+    function phoneDigits(s) { return (s.match(/\d/g) || []).length; }
+
+    function validate() {
+      let ok = true;
+      const fio = fioEl.value.trim();
+      if (fio.length < 3 || fio.split(/\s+/).length < 2) {
+        fioErr.textContent = 'Укажите фамилию и имя';
+        fioEl.classList.add('invalid'); ok = false;
+      } else { fioErr.textContent = ''; fioEl.classList.remove('invalid'); }
+
+      const d = phoneDigits(phoneEl.value);
+      if (d < 10 || d > 15) {
+        phoneErr.textContent = 'Введите корректный номер';
+        phoneEl.classList.add('invalid'); ok = false;
+      } else { phoneErr.textContent = ''; phoneEl.classList.remove('invalid'); }
+
+      const addr = addressInput.value.trim();
+      if (addr.length < 5) {
+        addrErr.textContent = 'Укажите адрес доставки';
+        addressInput.classList.add('invalid'); ok = false;
+      } else { addrErr.textContent = ''; addressInput.classList.remove('invalid'); }
+
+      updateMainButton(ok);
+      return ok;
+    }
+
+    fioEl.addEventListener('input', validate);
+    phoneEl.addEventListener('input', validate);
+
+    function submit() {
+      if (!validate()) return;
+      const payload = {
+        pid: Number(PID) || 0,
+        fio: fioEl.value.trim(),
+        phone: phoneEl.value.trim(),
+        address: addressInput.value.trim(),
+        comment: document.getElementById('comment').value.trim(),
+        lat: lat, lon: lon,
+      };
+      if (tg && tg.sendData) {
+        tg.sendData(JSON.stringify(payload));
+      } else {
+        alert('Откройте форму из Telegram-бота.');
+      }
+    }
+
+    // ---- Telegram MainButton (falls back to in-page button outside Telegram) ----
+    function updateMainButton(ok) {
+      if (!tg || !tg.MainButton) return;
+      if (ok) tg.MainButton.enable(); else tg.MainButton.disable();
+    }
+
+    if (tg && tg.MainButton) {
+      tg.MainButton.setText('Оформить заказ');
+      tg.MainButton.show();
+      tg.MainButton.onClick(submit);
+      document.getElementById('fallbackSubmit').style.display = 'none';
+    } else {
+      document.getElementById('fallbackSubmit').addEventListener('click', submit);
+    }
+
+    validate();
+  </script>
+</body>
+</html>
