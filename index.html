@@ -32,7 +32,7 @@
     .product .name { font-weight: 600; font-size: 15px; }
     .product .price { color: var(--accent); font-weight: 700; font-size: 18px; margin-top: 4px; }
     label { display: block; font-size: 13px; color: var(--hint); margin: 14px 0 6px; }
-    input {
+    input, select {
       width: 100%;
       padding: 12px 14px;
       border-radius: 10px;
@@ -42,8 +42,8 @@
       font-size: 16px;
       outline: none;
     }
-    input:focus { border-color: var(--accent); }
-    input.invalid { border-color: var(--danger); }
+    input:focus, select:focus { border-color: var(--accent); }
+    input.invalid, select.invalid { border-color: var(--danger); }
     .err { color: var(--danger); font-size: 12px; min-height: 14px; margin-top: 4px; }
     #map { height: 240px; border-radius: 12px; margin-top: 6px; overflow: hidden; background: var(--field); }
     .addr-wrap { position: relative; }
@@ -101,6 +101,15 @@
   </div>
 
   <div id="deliveryBlock">
+    <label for="citySelect">Город доставки</label>
+    <select id="citySelect"></select>
+    <div class="hint-small" id="cityHint"></div>
+    <div id="otherCityWrap" style="display:none">
+      <label for="otherCity">Ваш город</label>
+      <input id="otherCity" type="text" placeholder="Например: Краснодар" autocomplete="off" />
+    </div>
+    <div class="err" id="cityErr"></div>
+
     <label>Адрес доставки</label>
     <div class="addr-wrap">
       <input id="address" type="text" placeholder="Начните вводить: город, улица, дом" autocomplete="off" />
@@ -141,6 +150,58 @@
 
     document.getElementById('pName').textContent = PNAME;
     document.getElementById('pPrice').textContent = PRICE ? (Number(PRICE).toLocaleString('ru-RU') + ' ₽') : '';
+
+    // ───────── Города доставки ─────────
+    // Список быстрых городов передаётся ботом как cities=CODE:Label,CODE:Label.
+    // Фоллбэк — захардкоженный список (синхронизирован с DeliveryCity на бэке).
+    const OTHER_CITY = '__OTHER__';
+    const DEFAULT_CITIES = [
+      ['MOSCOW', 'Москва'], ['SPB', 'Санкт-Петербург'], ['SAMARA', 'Самара'],
+      ['VORONEZH', 'Воронеж'], ['BELGOROD', 'Белгород'],
+    ];
+    function parseCities(raw) {
+      if (!raw) return DEFAULT_CITIES;
+      const parsed = raw.split(',').map(p => p.split(':')).filter(p => p.length === 2 && p[0] && p[1]);
+      return parsed.length ? parsed : DEFAULT_CITIES;
+    }
+    const FAST_CITIES = parseCities(params.get('cities'));
+    const citySelect = document.getElementById('citySelect');
+    const otherCityWrap = document.getElementById('otherCityWrap');
+    const otherCityInput = document.getElementById('otherCity');
+    const cityErr = document.getElementById('cityErr');
+    const cityHint = document.getElementById('cityHint');
+    (function fillCities() {
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = 'Выберите город';
+      placeholder.disabled = true; placeholder.selected = true;
+      citySelect.appendChild(placeholder);
+      FAST_CITIES.forEach(([code, label]) => {
+        const o = document.createElement('option');
+        o.value = code; o.textContent = label;
+        citySelect.appendChild(o);
+      });
+      const other = document.createElement('option');
+      other.value = OTHER_CITY;
+      other.textContent = 'Другой город (доставка ТК)';
+      citySelect.appendChild(other);
+    })();
+    function selectedCity() {
+      const v = citySelect.value;
+      if (!v) return { code: null, name: '' };
+      if (v === OTHER_CITY) return { code: null, name: otherCityInput.value.trim() };
+      const match = FAST_CITIES.find(c => c[0] === v);
+      return { code: v, name: match ? match[1] : '' };
+    }
+    citySelect.addEventListener('change', () => {
+      const isOther = citySelect.value === OTHER_CITY;
+      otherCityWrap.style.display = isOther ? 'block' : 'none';
+      cityHint.textContent = isOther
+        ? 'Доставка в этот город осуществляется транспортной компанией.'
+        : 'Быстрая доставка в выбранный город.';
+      if (citySelect.value && citySelect.value !== OTHER_CITY) cityHint.textContent = 'Быстрая доставка в выбранный город.';
+      validate();
+    });
 
     // Prefill ФИО from Telegram profile if available.
     try {
@@ -338,12 +399,19 @@
       } else { phoneErr.textContent = ''; phoneEl.classList.remove('invalid'); }
 
       if (fulfillment === 'DELIVERY') {
+        const city = selectedCity();
+        if (!citySelect.value || (citySelect.value === OTHER_CITY && city.name.length < 2)) {
+          cityErr.textContent = citySelect.value === OTHER_CITY ? 'Укажите название города' : 'Выберите город доставки';
+          citySelect.classList.add('invalid'); ok = false;
+        } else { cityErr.textContent = ''; citySelect.classList.remove('invalid'); }
+
         const addr = addressInput.value.trim();
         if (addr.length < 5) {
           addrErr.textContent = 'Укажите адрес доставки';
           addressInput.classList.add('invalid'); ok = false;
         } else { addrErr.textContent = ''; addressInput.classList.remove('invalid'); }
       } else {
+        cityErr.textContent = ''; citySelect.classList.remove('invalid');
         addrErr.textContent = ''; addressInput.classList.remove('invalid');
       }
 
@@ -353,15 +421,19 @@
 
     fioEl.addEventListener('input', validate);
     phoneEl.addEventListener('input', validate);
+    otherCityInput.addEventListener('input', validate);
 
     function submit() {
       if (!validate()) return;
       const isDelivery = fulfillment === 'DELIVERY';
+      const city = selectedCity();
       const payload = {
         pid: Number(PID) || 0,
         fio: fioEl.value.trim(),
         phone: phoneEl.value.trim(),
         fulfillment: fulfillment,
+        city: isDelivery ? city.name : '',
+        cityCode: isDelivery ? (city.code || '') : '',
         address: isDelivery ? addressInput.value.trim() : '',
         comment: document.getElementById('comment').value.trim(),
         lat: isDelivery ? lat : null,
