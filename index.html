@@ -140,6 +140,7 @@
     const PID = params.get('pid') || '';
     const PNAME = params.get('name') || 'Товар';
     const PRICE = params.get('price') || '';
+    const MODE = params.get('mode') || 'n';
 
     // ───────── Ключи (безопасны для браузера; ограничьте по домену/referer в кабинетах) ─────────
     // Приоритет — query-параметры от бота (app.bot.webapp-*), затем хардкод-фоллбэк ниже.
@@ -433,6 +434,7 @@
       const city = selectedCity();
       const payload = {
         pid: Number(PID) || 0,
+        mode: MODE,
         fio: fioEl.value.trim(),
         phone: phoneEl.value.trim(),
         fulfillment: fulfillment,
