@@ -34,6 +34,9 @@
       margin-bottom: 18px;
     }
     .product .name { font-weight: 600; font-size: 15px; }
+    .product .summary {
+      color: var(--hint); font-size: 13px; margin-top: 8px; white-space: pre-line; line-height: 1.35;
+    }
     .product .price { color: var(--accent); font-weight: 700; font-size: 18px; margin-top: 4px; }
     label { display: block; font-size: 13px; color: var(--hint); margin: 14px 0 6px; }
     input, select {
@@ -87,6 +90,7 @@
 <body>
   <div class="product" id="product">
     <div class="name" id="pName">Товар</div>
+    <div class="summary" id="pSummary" style="display:none"></div>
     <div class="price" id="pPrice"></div>
   </div>
 
@@ -137,10 +141,12 @@
     if (tg) { tg.ready(); tg.expand(); }
 
     const params = new URLSearchParams(location.search);
+    const IS_CART = params.get('cart') === '1';
     const PID = params.get('pid') || '';
-    const PNAME = params.get('name') || 'Товар';
-    const PRICE = params.get('price') || '';
+    const PNAME = params.get('name') || (IS_CART ? 'Корзина' : 'Товар');
+    const PRICE = params.get('price') || params.get('total') || '';
     const MODE = params.get('mode') || 'n';
+    const SUMMARY = params.get('summary') || '';
 
     // ───────── Ключи (безопасны для браузера; ограничьте по домену/referer в кабинетах) ─────────
     // Приоритет — query-параметры от бота (app.bot.webapp-*), затем хардкод-фоллбэк ниже.
@@ -155,6 +161,11 @@
 
     document.getElementById('pName').textContent = PNAME;
     document.getElementById('pPrice').textContent = PRICE ? (Number(PRICE).toLocaleString('ru-RU') + ' ₽') : '';
+    const summaryEl = document.getElementById('pSummary');
+    if (IS_CART && SUMMARY) {
+      summaryEl.textContent = SUMMARY;
+      summaryEl.style.display = 'block';
+    }
 
     // ───────── Города доставки ─────────
     // Список быстрых городов передаётся ботом как cities=CODE:Label,CODE:Label.
@@ -433,8 +444,9 @@
       const isDelivery = fulfillment === 'DELIVERY';
       const city = selectedCity();
       const payload = {
-        pid: Number(PID) || 0,
-        mode: MODE,
+        cart: IS_CART,
+        pid: IS_CART ? 0 : (Number(PID) || 0),
+        mode: IS_CART ? 'n' : MODE,
         fio: fioEl.value.trim(),
         phone: phoneEl.value.trim(),
         fulfillment: fulfillment,
